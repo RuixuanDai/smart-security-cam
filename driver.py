@@ -14,14 +14,16 @@ from tflite_runtime.interpreter import Interpreter
 import numpy as np
 from PIL import Image
 
+# Using globals, may refactor to passing args
 args = None
 camera = None
 interpreter = None
 annotator = None
 labels = None
-stream = None
+stream = None # This is especially problematic style wise, its dynamic
 input_width = None
 input_height = None
+alert_meta = None
 
 # Camera Config
 CAMERA_HEIGHT = 240
@@ -35,7 +37,8 @@ ALERT_COMPLETE = 4
 
 
 def local_inference_state():
-    print("Local Inference")
+
+    global alert_meta
 
     camera.capture(stream, format='jpeg')
 
@@ -55,8 +58,13 @@ def local_inference_state():
     stream.seek(0)
     stream.truncate()
 
-    return LOCAL_NEGATIVE
-    # return LOCAL_POSITIVE
+    obj_set = {labels[obj['class_id']] for obj in results}
+
+    if 'person' in obj_set:
+        alert_meta = {"time_of_alert_ns": perf_counter_ns()}
+        return LOCAL_POSITIVE
+    else:
+        return LOCAL_NEGATIVE
 
 
 def remote_inference_state():
@@ -65,10 +73,12 @@ def remote_inference_state():
 
 def alert_state():
     print("ALERT!!!")
-    # print("ABORTING")
-    return ALERT_COMPLETE
-    # camera.stop_preview()
-    # exit()
+    # push_alert()
+    # return ALERT_COMPLETE
+
+    print("ABORTING")
+    camera.stop_preview()
+    exit()
 
 
 # FSM Switch
@@ -77,6 +87,9 @@ state_switch = {
     LOCAL_POSITIVE: alert_state,
     ALERT_COMPLETE: local_inference_state
 }
+
+def push_alert():
+    raise NotImplementedError
 
 
 def load_labels(path):
@@ -184,25 +197,6 @@ def main():
 
     while iters < limit:
     # while True:
-
-        # camera.capture(stream, format='jpeg')
-        #
-        # stream.seek(0)
-        # image = Image.open(stream).convert('RGB').resize(
-        #     (input_width, input_height), Image.ANTIALIAS)
-        # start_time = perf_counter_ns()
-        # results = detect_objects(interpreter, image, args['thresh'])
-        # elapsed_ns = perf_counter_ns() - start_time
-        # print("Local inference (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
-        #
-        # annotator.clear()
-        # annotate_objects(annotator, results, labels)
-        # annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000**-1)))
-        # annotator.update()
-        #
-        # stream.seek(0)
-        # stream.truncate()
-
 
         new_state = state_switch[old_state]
         signal = new_state()
