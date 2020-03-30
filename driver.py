@@ -199,8 +199,7 @@ def main():
     # while True:
 
         new_state = state_switch[old_state]
-        signal = new_state()
-        old_state = signal
+        old_state = new_state()
 
         iters += 1
 
