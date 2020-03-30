@@ -1,25 +1,60 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import argparse
+import io
+import re
+import time
+from annotation import Annotator
 from picamera import PiCamera
 from time import sleep,perf_counter_ns
 from sys import exit
-import tflite_runtime.interpreter as tflite
+from tflite_runtime.interpreter import Interpreter
+import numpy as np
+from PIL import Image
 
-# interpreter = tflite.Interpreter(model_path=args.model_file)
+args = None
+camera = None
+interpreter = None
+annotator = None
+labels = None
+stream = None
+input_width = None
+input_height = None
 
-CAMERA_WIDTH, CAMERA_HEIGHT = 640, 480
+# Camera Config
+CAMERA_HEIGHT = 240
+CAMERA_WIDTH = round(CAMERA_HEIGHT*1.33)
 
-camera = PiCamera(resolution=(CAMERA_WIDTH, CAMERA_HEIGHT), framerate=30)
-
-
-def capture_state():
-    print("Capturing")
-    global camera
-    sleep(1)
-    return NEW_CAM_DATA
+# FSM Constants
+LOCAL_NEGATIVE = 1
+LOCAL_POSITIVE = 2
+LOCAL_UNCERTAIN = 3
+ALERT_COMPLETE = 4
 
 
 def local_inference_state():
     print("Local Inference")
-    sleep(1)
+
+    camera.capture(stream, format='jpeg')
+
+    stream.seek(0)
+    image = Image.open(stream).convert('RGB').resize(
+        (input_width, input_height), Image.ANTIALIAS)
+    start_time = perf_counter_ns()
+    results = detect_objects(interpreter, image, args['thresh'])
+    elapsed_ns = perf_counter_ns() - start_time
+    print("Local inference (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
+
+    annotator.clear()
+    annotate_objects(annotator, results, labels)
+    annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000 ** -1)))
+    annotator.update()
+
+    stream.seek(0)
+    stream.truncate()
+
     return LOCAL_NEGATIVE
     # return LOCAL_POSITIVE
 
@@ -30,28 +65,98 @@ def remote_inference_state():
 
 def alert_state():
     print("ALERT!!!")
-    print("ABORTING")
-    camera.stop_preview()
-    exit()
+    # print("ABORTING")
+    return ALERT_COMPLETE
+    # camera.stop_preview()
+    # exit()
 
 
-# STATE SIGNALS
-NEW_CAM_DATA = 0
-LOCAL_NEGATIVE = 1
-LOCAL_POSITIVE = 2
-LOCAL_UNCERTAIN = 3
-
-
+# FSM Switch
 state_switch = {
-    NEW_CAM_DATA: local_inference_state,
-    LOCAL_NEGATIVE: capture_state,
-    LOCAL_POSITIVE: alert_state
+    LOCAL_NEGATIVE: local_inference_state,
+    LOCAL_POSITIVE: alert_state,
+    ALERT_COMPLETE: local_inference_state
 }
+
+
+def load_labels(path):
+  """Loads the labels file. Supports files with or without index numbers."""
+  with open(path, 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+    labels = {}
+    for row_number, content in enumerate(lines):
+      pair = re.split(r'[:\s]+', content.strip(), maxsplit=1)
+      if len(pair) == 2 and pair[0].strip().isdigit():
+        labels[int(pair[0])] = pair[1].strip()
+      else:
+        labels[row_number] = pair[0].strip()
+  return labels
+
+
+def set_input_tensor(interpreter, image):
+  """Sets the input tensor."""
+  tensor_index = interpreter.get_input_details()[0]['index']
+  input_tensor = interpreter.tensor(tensor_index)()[0]
+  input_tensor[:, :] = image
+
+
+def get_output_tensor(interpreter, index):
+  """Returns the output tensor at the given index."""
+  output_details = interpreter.get_output_details()[index]
+  tensor = np.squeeze(interpreter.get_tensor(output_details['index']))
+  return tensor
+
+
+def detect_objects(interpreter, image, threshold):
+  """Returns a list of detection results, each a dictionary of object info."""
+  set_input_tensor(interpreter, image)
+  interpreter.invoke()
+
+  # Get all output details
+  boxes = get_output_tensor(interpreter, 0)
+  classes = get_output_tensor(interpreter, 1)
+  scores = get_output_tensor(interpreter, 2)
+  count = int(get_output_tensor(interpreter, 3))
+
+  results = []
+  for i in range(count):
+    if scores[i] >= threshold:
+      result = {
+          'bounding_box': boxes[i],
+          'class_id': classes[i],
+          'score': scores[i]
+      }
+      results.append(result)
+  return results
+
+
+def annotate_objects(annotator, results, labels):
+  """Draws the bounding box and label for each object in the results."""
+  for obj in results:
+    # Convert the bounding box figures from relative coordinates
+    # to absolute coordinates based on the original resolution
+    ymin, xmin, ymax, xmax = obj['bounding_box']
+    xmin = int(xmin * CAMERA_WIDTH)
+    xmax = int(xmax * CAMERA_WIDTH)
+    ymin = int(ymin * CAMERA_HEIGHT)
+    ymax = int(ymax * CAMERA_HEIGHT)
+
+    # Overlay the box, label, and score on the camera preview
+    annotator.bounding_box([xmin, ymin, xmax, ymax])
+    annotator.text([xmin, ymin],
+                   '%s\n%.2f' % (labels[obj['class_id']], obj['score']))
 
 
 def main():
 
-    camera.start_preview()
+    global args
+    global camera
+    global interpreter
+    global annotator
+    global labels
+    global stream
+    global input_width
+    global input_height
 
     old_state = LOCAL_NEGATIVE
 
@@ -61,8 +166,43 @@ def main():
     t0 = perf_counter_ns()
     print("Starting!")
 
+    args = {}
+    args['model'] = 'model/detect.tflite'
+    args['labels'] = 'model/coco_labels.txt'
+    args['thresh'] = 0.7
+
+    labels = load_labels(args['labels'])
+    interpreter = Interpreter(args['model'])
+    interpreter.allocate_tensors()
+    _, input_height, input_width, _ = interpreter.get_input_details()[0]['shape']
+
+    camera = PiCamera(resolution=(CAMERA_WIDTH, CAMERA_HEIGHT), framerate=30)
+    camera.start_preview()
+
+    stream = io.BytesIO()
+    annotator = Annotator(camera)
+
     while iters < limit:
     # while True:
+
+        # camera.capture(stream, format='jpeg')
+        #
+        # stream.seek(0)
+        # image = Image.open(stream).convert('RGB').resize(
+        #     (input_width, input_height), Image.ANTIALIAS)
+        # start_time = perf_counter_ns()
+        # results = detect_objects(interpreter, image, args['thresh'])
+        # elapsed_ns = perf_counter_ns() - start_time
+        # print("Local inference (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
+        #
+        # annotator.clear()
+        # annotate_objects(annotator, results, labels)
+        # annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000**-1)))
+        # annotator.update()
+        #
+        # stream.seek(0)
+        # stream.truncate()
+
 
         new_state = state_switch[old_state]
         signal = new_state()
@@ -75,7 +215,6 @@ def main():
     delta = t1 - t0
     print("CPU time elapsed (ns): ", format(delta, '.3e'))  # CPU nano seconds elapsed (floating point)
     print("Avg ns/state: ",format(delta/iters, '.1f'))
-
 
 if __name__ == '__main__':
     main()
