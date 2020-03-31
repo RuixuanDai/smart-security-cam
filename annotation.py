@@ -29,7 +29,7 @@ from __future__ import division
 from __future__ import print_function
 
 from PIL import Image
-from PIL import ImageDraw
+from PIL import ImageDraw, ImageFont
 
 
 def _round_up(value, n):
@@ -79,6 +79,7 @@ class Annotator:
     self._overlay = None
     self._draw = ImageDraw.Draw(self._buffer)
     self._default_color = default_color or (0xFF, 0, 0, 0xFF)
+    self._alert_fnt = ImageFont.truetype('./resources/courier-boldregular.ttf', 150)
 
   def update(self):
     """Draws any changes to the image buffer onto the overlay."""
@@ -112,7 +113,7 @@ class Annotator:
     outline = outline or self._default_color
     self._draw.rectangle(rect, fill=fill, outline=outline)
 
-  def text(self, location, text, color=None):
+  def text(self, location, text, color=None, alert=False):
     """Draws the given text at the given location.
 
     Args:
@@ -122,4 +123,7 @@ class Annotator:
         default_color).
     """
     color = color or self._default_color
-    self._draw.text(location, text, fill=color)
+    if alert:
+      self._draw.text(location, text, fnt=self._alert_fnt, fill=color)
+    else:
+      self._draw.text(location, text, fill=color)

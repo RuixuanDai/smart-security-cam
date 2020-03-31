@@ -14,6 +14,8 @@ from tflite_runtime.interpreter import Interpreter
 import numpy as np
 from PIL import Image
 import cloud_functions as cf
+from datetime import datetime
+import time
 
 # Using globals, may refactor to passing args
 args = None
@@ -25,6 +27,8 @@ stream = None # This is especially problematic style wise, its dynamic
 input_width = None
 input_height = None
 alert_meta = None
+last_alert = None # Same here
+debounce_time = 0.2*(10**9)
 
 # Camera Config
 CAMERA_HEIGHT = 240
@@ -44,8 +48,7 @@ def local_inference_state():
     camera.capture(stream, format='jpeg')
 
     stream.seek(0)
-    image = Image.open(stream).convert('RGB').resize(
-        (input_width, input_height), Image.ANTIALIAS)
+    image = Image.open(stream).convert('RGB').resize((input_width, input_height), Image.ANTIALIAS)
     start_time = perf_counter_ns()
     results = detect_objects(interpreter, image, args['thresh'])
     elapsed_ns = perf_counter_ns() - start_time
@@ -62,7 +65,6 @@ def local_inference_state():
     obj_set = {labels[obj['class_id']] for obj in results}
 
     if 'person' in obj_set:
-        alert_meta = {"time_of_alert_ns": perf_counter_ns()}
         return LOCAL_POSITIVE
     else:
         return LOCAL_NEGATIVE
@@ -73,12 +75,27 @@ def remote_inference_state():
 
 
 def alert_state():
-    print("ALERT!!!")
-    cf.sendAlert("ALERT!!!")
 
-    print("ABORTING")
-    camera.stop_preview()
-    exit()
+    global last_alert
+    global annotator
+    global debounce_time
+
+    print("ALERT!!!")
+
+    annotator.text([100, 100], 'INTRUDER DETECTED', alert=True)
+    annotator.update()
+
+    stamp = datetime.fromtimestamp(time.time())
+
+    if (perf_counter_ns() - last_alert) > debounce_time:
+        alert_meta = stamp.strftime("%m-%d-%Y %H:%M:%S")
+        cf.sendAlert("INTRUDER ALERT "+alert_meta)
+
+    return ALERT_COMPLETE
+
+    # print("ABORTING")
+    # camera.stop_preview()
+    # exit()
 
 
 # FSM Switch
@@ -170,11 +187,13 @@ def main():
     global stream
     global input_width
     global input_height
+    global last_alert
 
     old_state = LOCAL_NEGATIVE
+    last_alert = perf_counter_ns()
 
     iters = 0
-    limit = 10
+    limit = 40
 
     t0 = perf_counter_ns()
     print("Starting!")
@@ -182,7 +201,7 @@ def main():
     args = {}
     args['model'] = 'model/detect.tflite'
     args['labels'] = 'model/coco_labels.txt'
-    args['thresh'] = 0.7
+    args['thresh'] = 0.5
 
     labels = load_labels(args['labels'])
     interpreter = Interpreter(args['model'])
