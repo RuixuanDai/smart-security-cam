@@ -13,6 +13,7 @@ from sys import exit
 from tflite_runtime.interpreter import Interpreter
 import numpy as np
 from PIL import Image
+import cloud_functions as cf
 
 # Using globals, may refactor to passing args
 args = None
@@ -73,8 +74,7 @@ def remote_inference_state():
 
 def alert_state():
     print("ALERT!!!")
-    # push_alert()
-    # return ALERT_COMPLETE
+    cf.sendAlert("ALERT!!!")
 
     print("ABORTING")
     camera.stop_preview()
