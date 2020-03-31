@@ -2,8 +2,8 @@
 import boto3
 
 client = boto3.client( service_name = 'iot-data',
-                        aws_access_key_id='AKIAVQY6WPNC3FVUXSMZ',
-                        aws_secret_access_key='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',
+                        aws_access_key_id='xxx',
+                        aws_secret_access_key='xxx',
                         region_name='us-east-2'
                         )
 
