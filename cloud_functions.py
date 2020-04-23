@@ -5,14 +5,14 @@ clients = {}
 
 clients["sns"] = boto3.client(
                       "sns",
-                      aws_access_key_id="",
-                      aws_secret_access_key="",
+                      aws_access_key_id="X",
+                      aws_secret_access_key="X",
                       region_name="us-east-1"
                       )
 clients["rekognition"] = boto3.client(
                       "rekognition",
-                      aws_access_key_id="",
-                      aws_secret_access_key="",
+                      aws_access_key_id="X",
+                      aws_secret_access_key="X",
                       region_name="us-east-2"
                       )
 

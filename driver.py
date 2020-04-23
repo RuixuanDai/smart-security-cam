@@ -28,9 +28,9 @@ labels = None
 stream = None # This is especially problematic style wise, its dynamic
 input_width = None
 input_height = None
-alert_meta = {"type": None, "confidence": 0.0}
+alert_meta = {"type": None, "confidence": 0.0, "time": None}
 last_alert = None # Same here
-debounce_time = 0.2*(10**9)
+debounce_time = 0.3*(10**9)
 
 # Camera Config
 CAMERA_HEIGHT = 240
@@ -86,7 +86,6 @@ def local_inference_state():
 def cloud_inference_state():
     global args
 
-    print("Cloud inference")
     stream.seek(0)
     cf.AWS_detect_labels(stream, args["cloud_thresh"])
     stream.seek(0)
@@ -109,16 +108,17 @@ def alert_state():
     stamp = datetime.fromtimestamp(time.time())
 
     if (perf_counter_ns() - last_alert) > debounce_time:
-        alert_meta = stamp.strftime("%m-%d-%Y %H:%M:%S")
-        cf.send_Alert_Email("INTRUDER ALERT "+alert_meta)
+
+        alert_meta["time"] = stamp.strftime("%m-%d-%Y %H:%M:%S")
+        cf.send_Alert_Email("INTRUDER ALERT "+str(alert_meta))
 
         last_alert = perf_counter_ns()
 
-    # return ALERT_COMPLETE
+    return ALERT_COMPLETE
 
-    print("ABORTING")
-    camera.stop_preview()
-    exit()
+    # print("ABORTING")
+    # camera.stop_preview()
+    # exit()
 
 
 # FSM Switch
@@ -164,10 +164,10 @@ def detect_objects(interpreter, image, threshold):
   """Returns a list of detection results, each a dictionary of object info."""
   set_input_tensor(interpreter, image)
 
-  start_time = perf_counter_ns()
+  # start_time = perf_counter_ns()
   interpreter.invoke()
-  elapsed_ns = perf_counter_ns() - start_time
-  print("Interpreter Invocation (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
+  # elapsed_ns = perf_counter_ns() - start_time
+  # print("Interpreter Invocation (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
 
   # Get all output details
   boxes = get_output_tensor(interpreter, 0)
@@ -220,7 +220,7 @@ def main():
     last_alert = perf_counter_ns()
 
     iters = 0
-    limit = 40
+    limit = 80
 
     t0 = perf_counter_ns()
     print("Starting!")
@@ -232,8 +232,8 @@ def main():
 
     args['labels'] = 'model/coco_labels.txt'
     args['base_thresh'] = 0.5
-    args['local_thresh'] = 0.7
-    args['cloud_thresh'] = 75
+    args['local_thresh'] = 0.68
+    args['cloud_thresh'] = 90
 
     labels = load_labels(args['labels'])
 
