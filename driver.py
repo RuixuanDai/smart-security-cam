@@ -89,7 +89,7 @@ def alert_state():
 
     if (perf_counter_ns() - last_alert) > debounce_time:
         alert_meta = stamp.strftime("%m-%d-%Y %H:%M:%S")
-        cf.sendAlert("INTRUDER ALERT "+alert_meta)
+        cf.send_Alert_Email("INTRUDER ALERT "+alert_meta)
 
     return ALERT_COMPLETE
 
