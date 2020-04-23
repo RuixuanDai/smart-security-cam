@@ -10,7 +10,9 @@ from annotation import Annotator
 from picamera import PiCamera
 from time import sleep,perf_counter_ns
 from sys import exit
-from tflite_runtime.interpreter import Interpreter
+
+from tflite_runtime.interpreter import Interpreter, load_delegate
+
 import numpy as np
 from PIL import Image
 import cloud_functions as cf
@@ -26,7 +28,7 @@ labels = None
 stream = None # This is especially problematic style wise, its dynamic
 input_width = None
 input_height = None
-alert_meta = None
+alert_meta = {"type": None, "confidence": 0.0}
 last_alert = None # Same here
 debounce_time = 0.2*(10**9)
 
@@ -39,6 +41,10 @@ LOCAL_NEGATIVE = 1
 LOCAL_POSITIVE = 2
 LOCAL_UNCERTAIN = 3
 ALERT_COMPLETE = 4
+CLOUD_INFERENCE_COMPLETE = 5
+
+LOCAL_ALERT = 9
+CLOUD_ALERT = 10
 
 
 def local_inference_state():
@@ -48,9 +54,10 @@ def local_inference_state():
     camera.capture(stream, format='jpeg')
 
     stream.seek(0)
+
     image = Image.open(stream).convert('RGB').resize((input_width, input_height), Image.ANTIALIAS)
     start_time = perf_counter_ns()
-    results = detect_objects(interpreter, image, args['thresh'])
+    results = detect_objects(interpreter, image, args['base_thresh'])
     elapsed_ns = perf_counter_ns() - start_time
     print("Local inference (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
 
@@ -59,24 +66,38 @@ def local_inference_state():
     annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000 ** -1)))
     annotator.update()
 
+    for obj in results:
+        if labels[obj['class_id']] == 'person':
+
+            if obj['score'] >= args["local_thresh"]:
+                stream.seek(0)
+                stream.truncate()
+                alert_meta["type"] = LOCAL_ALERT
+                alert_meta["confidence"] = obj['score']
+                return LOCAL_POSITIVE
+            else:
+                return LOCAL_UNCERTAIN
+
     stream.seek(0)
     stream.truncate()
-
-    obj_set = {labels[obj['class_id']] for obj in results}
-
-    if 'person' in obj_set:
-        return LOCAL_POSITIVE
-    else:
-        return LOCAL_NEGATIVE
+    return LOCAL_NEGATIVE
 
 
-def remote_inference_state():
-    raise NotImplementedError
+def cloud_inference_state():
+    global args
+
+    print("Cloud inference")
+    stream.seek(0)
+    cf.AWS_detect_labels(stream, args["cloud_thresh"])
+    stream.seek(0)
+    stream.truncate()
+    return CLOUD_INFERENCE_COMPLETE
 
 
 def alert_state():
 
     global last_alert
+    global alert_meta
     global annotator
     global debounce_time
 
@@ -91,22 +112,24 @@ def alert_state():
         alert_meta = stamp.strftime("%m-%d-%Y %H:%M:%S")
         cf.send_Alert_Email("INTRUDER ALERT "+alert_meta)
 
-    return ALERT_COMPLETE
+        last_alert = perf_counter_ns()
 
-    # print("ABORTING")
-    # camera.stop_preview()
-    # exit()
+    # return ALERT_COMPLETE
+
+    print("ABORTING")
+    camera.stop_preview()
+    exit()
 
 
 # FSM Switch
 state_switch = {
     LOCAL_NEGATIVE: local_inference_state,
     LOCAL_POSITIVE: alert_state,
-    ALERT_COMPLETE: local_inference_state
+    LOCAL_UNCERTAIN: cloud_inference_state,
+    ALERT_COMPLETE: local_inference_state,
+    CLOUD_INFERENCE_COMPLETE: local_inference_state
 }
 
-def push_alert():
-    raise NotImplementedError
 
 
 def load_labels(path):
@@ -140,7 +163,11 @@ def get_output_tensor(interpreter, index):
 def detect_objects(interpreter, image, threshold):
   """Returns a list of detection results, each a dictionary of object info."""
   set_input_tensor(interpreter, image)
+
+  start_time = perf_counter_ns()
   interpreter.invoke()
+  elapsed_ns = perf_counter_ns() - start_time
+  print("Interpreter Invocation (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
 
   # Get all output details
   boxes = get_output_tensor(interpreter, 0)
@@ -189,7 +216,7 @@ def main():
     global input_height
     global last_alert
 
-    old_state = LOCAL_NEGATIVE
+    new_state = LOCAL_NEGATIVE
     last_alert = perf_counter_ns()
 
     iters = 0
@@ -199,12 +226,21 @@ def main():
     print("Starting!")
 
     args = {}
-    args['model'] = 'model/detect.tflite'
+
+    # args['model'] = 'model/detect.tflite'
+    args['model'] = 'model/mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite'
+
     args['labels'] = 'model/coco_labels.txt'
-    args['thresh'] = 0.5
+    args['base_thresh'] = 0.5
+    args['local_thresh'] = 0.7
+    args['cloud_thresh'] = 75
 
     labels = load_labels(args['labels'])
-    interpreter = Interpreter(args['model'])
+
+    # interpreter = Interpreter(args['model'])
+    interpreter = Interpreter(args['model'],
+                              experimental_delegates=[load_delegate('libedgetpu.so.1.0')])
+
     interpreter.allocate_tensors()
     _, input_height, input_width, _ = interpreter.get_input_details()[0]['shape']
 
@@ -217,8 +253,8 @@ def main():
     while iters < limit:
     # while True:
 
-        new_state = state_switch[old_state]
-        old_state = new_state()
+        curr_state_func = state_switch[new_state]
+        new_state = curr_state_func()
 
         iters += 1
 

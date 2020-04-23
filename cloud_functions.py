@@ -1,40 +1,50 @@
 import boto3
+from time import sleep,perf_counter_ns
 
-client = boto3.client(
+clients = {}
+
+clients["sns"] = boto3.client(
                       "sns",
-                      aws_access_key_id="xxxx",
-                      aws_secret_access_key="xxxx",
+                      aws_access_key_id="",
+                      aws_secret_access_key="",
                       region_name="us-east-1"
+                      )
+clients["rekognition"] = boto3.client(
+                      "rekognition",
+                      aws_access_key_id="",
+                      aws_secret_access_key="",
+                      region_name="us-east-2"
                       )
 
 
-
-topic = client.create_topic(Name="AlertEmail")
+topic = clients["sns"].create_topic(Name="AlertEmail")
 topic_arn = topic['TopicArn']
 
 
 def send_Alert_Email(message = "Security Alert: Intruder detected!"):
-    response = client.publish(
+    response = clients["sns"].publish(
                           TargetArn=topic_arn,
                           Message=message
                           )
 
 
 
-def AWS_detect_labels(image):
+def AWS_detect_labels(image, cloud_thresh):
     
-    IMGclient=boto3.client('rekognition')
-    
-    
-    response =  IMGclient.detect_labels(Image={'Bytes': image.read()})
+    IMGclient = clients["rekognition"]
 
-    alertSent = False
+    start_time = perf_counter_ns()
+    response = IMGclient.detect_labels(Image={'Bytes': image.read()})
+    elapsed_ns = perf_counter_ns() - start_time
+    print("Cloud Inference Response (ns): ", format(elapsed_ns, '.3e'))
+
     for label in response['Labels']:
-        if alertSent:
-            break
-        if (label['Name'] == 'Human' or label['Name'] == 'Person') and label ['Confidence'] > 60:
-            alertSent = True
-            sendAlertEmail(message='A {} was detected with {}% confidence.'.format(label['Name'],label['Confidence']))
+
+        if label['Name'] == 'Human' or label['Name'] == 'Person':
+            if label['Confidence'] >= cloud_thresh:
+                print("Cloud ALERT!!")
+                send_Alert_Email(message='A {} was detected with {}% confidence.'.format(label['Name'],label['Confidence']))
+                break
 
 
 
