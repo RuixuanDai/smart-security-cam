@@ -1,3 +1,6 @@
+# Boilerplate functions for interacting with PiCamera and tflite borrowed from
+#
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -6,6 +9,7 @@ import argparse
 import io
 import re
 import time
+import datetime
 from annotation import Annotator
 from picamera import PiCamera
 from time import sleep,perf_counter_ns
@@ -14,23 +18,29 @@ from sys import exit
 from tflite_runtime.interpreter import Interpreter, load_delegate
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 import cloud_functions as cf
 from datetime import datetime
 import time
 
-# Using globals, may refactor to passing args
+# Using globals, should refactor to passing args, dyn globals are the devil
 args = None
 camera = None
 interpreter = None
 annotator = None
 labels = None
-stream = None # This is especially problematic style wise, its dynamic
+stream = None
 input_width = None
 input_height = None
 alert_meta = {"type": None, "confidence": 0.0, "time": None}
 last_alert = None # Same here
 debounce_time = 0.3*(10**9)
+inf_loops = 0
+
+local_inference_deltas = []
+cloud_inference_deltas = []
+e2e_deltas = []
 
 # Camera Config
 CAMERA_HEIGHT = 240
@@ -56,14 +66,11 @@ def local_inference_state():
     stream.seek(0)
 
     image = Image.open(stream).convert('RGB').resize((input_width, input_height), Image.ANTIALIAS)
-    start_time = perf_counter_ns()
     results = detect_objects(interpreter, image, args['base_thresh'])
-    elapsed_ns = perf_counter_ns() - start_time
-    print("Local inference (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
 
     annotator.clear()
     annotate_objects(annotator, results, labels)
-    annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000 ** -1)))
+    # annotator.text([5, 0], '%.1fms' % (elapsed_ns * (1000000 ** -1)))
     annotator.update()
 
     for obj in results:
@@ -85,9 +92,13 @@ def local_inference_state():
 
 def cloud_inference_state():
     global args
+    global cloud_inference_deltas
 
     stream.seek(0)
-    cf.AWS_detect_labels(stream, args["cloud_thresh"])
+
+    time_delta = cf.AWS_detect_labels(stream, args["cloud_thresh"])
+    cloud_inference_deltas.append(time_delta)
+
     stream.seek(0)
     stream.truncate()
     return CLOUD_INFERENCE_COMPLETE
@@ -162,12 +173,17 @@ def get_output_tensor(interpreter, index):
 
 def detect_objects(interpreter, image, threshold):
   """Returns a list of detection results, each a dictionary of object info."""
+  global local_inference_deltas
+  global inf_loops
+
   set_input_tensor(interpreter, image)
 
-  # start_time = perf_counter_ns()
+  start_time = perf_counter_ns()
   interpreter.invoke()
-  # elapsed_ns = perf_counter_ns() - start_time
-  # print("Interpreter Invocation (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
+  elapsed_ns = perf_counter_ns() - start_time
+  local_inference_deltas.append(elapsed_ns)
+  inf_loops += 1
+  print("Interpreter Invocation (ns): ", format(elapsed_ns, '.3e'))  # CPU nano seconds elapsed (floating point)
 
   # Get all output details
   boxes = get_output_tensor(interpreter, 0)
@@ -215,20 +231,20 @@ def main():
     global input_width
     global input_height
     global last_alert
+    global local_inference_deltas
+    global cloud_inference_deltas
+    global e2e_deltas
+    global inf_loops
 
     new_state = LOCAL_NEGATIVE
     last_alert = perf_counter_ns()
 
-    iters = 0
-    limit = 80
-
-    t0 = perf_counter_ns()
     print("Starting!")
 
     args = {}
 
-    # args['model'] = 'model/detect.tflite'
-    args['model'] = 'model/mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite'
+    # args['model'] = 'model/detect.tflite' # CPU model
+    args['model'] = 'model/mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite' # TPU model
 
     args['labels'] = 'model/coco_labels.txt'
     args['base_thresh'] = 0.5
@@ -237,9 +253,8 @@ def main():
 
     labels = load_labels(args['labels'])
 
-    # interpreter = Interpreter(args['model'])
-    interpreter = Interpreter(args['model'],
-                              experimental_delegates=[load_delegate('libedgetpu.so.1.0')])
+    # interpreter = Interpreter(args['model']) # CPU model
+    interpreter = Interpreter(args['model'], experimental_delegates=[load_delegate('libedgetpu.so.1.0')]) # TPU model
 
     interpreter.allocate_tensors()
     _, input_height, input_width, _ = interpreter.get_input_details()[0]['shape']
@@ -250,19 +265,37 @@ def main():
     stream = io.BytesIO()
     annotator = Annotator(camera)
 
-    while iters < limit:
-    # while True:
+    # while True: # continuous run
+    while inf_loops < 10:
+
+        start = perf_counter_ns()
 
         curr_state_func = state_switch[new_state]
         new_state = curr_state_func()
 
-        iters += 1
+        time_delta = perf_counter_ns() - start
+        e2e_deltas.append(time_delta)
 
-    t1 = perf_counter_ns()
-    print("State switches: ",iters)
-    delta = t1 - t0
-    print("CPU time elapsed (ns): ", format(delta, '.3e'))  # CPU nano seconds elapsed (floating point)
-    print("Avg ns/state: ",format(delta/iters, '.1f'))
+        # iters += 1
+
+
+    print(len(local_inference_deltas))
+    print(len(cloud_inference_deltas))
+    print(len(e2e_deltas))
+
+    local_df = pd.DataFrame()
+    local_df["local_delta"] = local_inference_deltas
+    cloud_df = pd.DataFrame()
+    cloud_df["cloud_delta"] = cloud_inference_deltas
+    e2e_df = pd.DataFrame()
+    e2e_df["e2e_delta"] = e2e_deltas
+
+    local_df.head()
+
+    local_df.to_csv("results/local_deltas.csv")
+    cloud_df.to_csv("results/cloud_deltas.csv")
+    e2e_df.to_csv("results/e2e_deltas.csv")
+
 
 if __name__ == '__main__':
     main()
