@@ -1,5 +1,5 @@
 # Boilerplate functions for interacting with PiCamera and tflite borrowed from
-#
+# https://github.com/tensorflow/examples/tree/master/lite/examples
 
 from __future__ import absolute_import
 from __future__ import division
